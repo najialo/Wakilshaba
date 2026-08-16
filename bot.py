@@ -41,16 +41,17 @@ def ensure_files():
         with open(LEADS_FILE, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             writer.writerow(["الاسم", "الرقم", "طلب العميل", "التاريخ"])
+def normalize_text(text: str) -> str:
+    """توحيد الحروف المتشابهة عشان البحث يشتغل حتى لو اختلفت الكتابة"""
+    text = text.replace("ة", "ه")
+    text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    text = text.replace("ى", "ي")
+    return text
 
 
 def search_listings(query: str):
-    """
-    يبحث بملف العروض عن أي صف يحتوي على كلمة البحث.
-    مصمم بحيث ما ينهار حتى لو صار خطأ بعدد الفواصل بسطر معين —
-    بيتجاهل السطر الفاسد بدل ما يوقف البوت بالكامل.
-    """
     results = []
-    query = query.strip()
+    query = normalize_text(query.strip())
     if not query:
         return results
 
@@ -69,15 +70,17 @@ def search_listings(query: str):
                         values.extend(str(x) for x in v if x)
                     else:
                         values.append(str(v))
-                combined = " ".join(values)
+                combined = normalize_text(" ".join(values))
                 if query in combined:
-                    # نبني صف نظيف يحتوي فقط على الأعمدة المتوقعة
                     clean_row = {k: (row.get(k) if isinstance(row.get(k), str) else "") for k in fieldnames}
                     results.append(clean_row)
             except Exception as e:
                 logging.warning(f"سطر فيه مشكلة بملف listings.csv، تم تجاهله: {e}")
                 continue
     return results
+
+
+
 
 
 def format_listing(row: dict, idx: int) -> str:
