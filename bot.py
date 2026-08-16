@@ -148,10 +148,32 @@ async def save_lead(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = update.message.text
     name = context.user_data.get("name", "")
     last_query = context.user_data.get("last_query", "غير محدد")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    with open(LEADS_FILE, "a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.writer(f)
-        writer.writerow([name, phone, last_query, datetime.now().strftime("%Y-%m-%d %H:%M")])
+    # نحاول نحفظ بملف كنسخة احتياطية (قد يضيع عند إعادة التشغيل، لكن لا بأس)
+    try:
+        with open(LEADS_FILE, "a", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow([name, phone, last_query, now])
+    except Exception as e:
+        logging.warning(f"تعذر الحفظ بملف leads.csv: {e}")
+
+    # نرسل إشعار فوري لصاحب المكتب عشان ما تضيع أي بيانات عميل
+    admin_id = os.environ.get("ADMIN_CHAT_ID")
+    if admin_id:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=(
+                    "📩 عميل جديد سجل بياناته:\n\n"
+                    f"👤 الاسم: {name}\n"
+                    f"📞 الرقم: {phone}\n"
+                    f"🔍 كان يدور على: {last_query}\n"
+                    f"🕒 الوقت: {now}"
+                ),
+            )
+        except Exception as e:
+            logging.warning(f"تعذر إرسال إشعار للأدمن: {e}")
 
     await update.message.reply_text(
         f"يعطيك العافية {name} 🙏 سجلنا بياناتك وبنتواصل معك قريبًا.",
