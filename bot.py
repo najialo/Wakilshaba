@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 بوت تلجرام - وكيل الشباب أوفيس
-1) يرد تلقائي على استفسارات العملاء بالبحث في listings.csv
-2) يجمع بيانات العميل (اسم + رقم) ويخزنها في leads.csv ويرسلها للمالك فورا
+1) يرد تلقائي على استفسارات العملاء بالبحث الذكي في listings.csv
+2) يجمع بيانات العميل (اسم + رقم) ويخزنها في leads.csv ويرسلها للمالك فورًا
 """
 
 import csv
 import os
+import re
 import logging
 from datetime import datetime
+from difflib import SequenceMatcher
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -55,65 +57,115 @@ def normalize_text(text: str) -> str:
     return text
 
 
-# كلمات مرادفة/جموع - المفاتيح والقيم لازم تكون بصيغتها الطبيعية (رح تتطبع عليها normalize_text تلقائيًا تحت)
-_RAW_SYNONYMS = {
-    "شقق": "شقة", "شقه": "شقة", "الشقق": "شقة", "الشقه": "شقة",
-    "اراضي": "أرض", "أراضي": "أرض", "الاراضي": "أرض", "ارض": "أرض",
-    "الارض": "أرض", "قطعة": "أرض", "قطع": "أرض", "محضر": "أرض",
-    "منازل": "منزل", "بيوت": "منزل", "بيت": "منزل", "البيت": "منزل",
-    "البيوت": "منزل", "دار": "منزل",
-    "مزارع": "مزرعة",
-}
-# نبني نسخة مطبّعة (normalized) من القاموس عشان تطابق شكل الكلام بعد normalize_text
-SYNONYMS = {normalize_text(k): normalize_text(v) for k, v in _RAW_SYNONYMS.items()}
-
 _RAW_STOPWORDS = {
     "موجود", "موجوده", "موجودة", "متوفر", "متوفره", "متوفرة",
     "شوفي", "شوف", "شوفلي", "ورجيني", "بدي", "بدك", "بدنا",
     "عندك", "عندكم", "في", "فيه", "فيك", "هل", "وش", "شو",
     "ممكن", "لو", "سمحت", "من", "فضلك", "اريد", "أريد",
     "ابحث", "أبحث", "دور", "دوري", "عن", "على", "لدي",
-    "لديك", "لديكم", "يوجد", "عندي",
+    "لديك", "لديكم", "يوجد", "عندي", "الرجاء", "بحاجة", "محتاج",
 }
 STOPWORDS = {normalize_text(w) for w in _RAW_STOPWORDS}
 
+# كلمات بتدل على نية معينة (ترتيب حسب سعر/مساحة)
+_RAW_CHEAP = {"رخيص", "رخيصه", "رخيصة", "بسيط", "اقتصادي", "قليل", "منخفض"}
+_RAW_EXPENSIVE = {"غالي", "فاخر", "فخم", "مميز", "راقي", "عالي"}
+_RAW_BIG = {"كبير", "كبيره", "كبيرة", "واسع", "واسعه", "واسعة"}
+_RAW_SMALL = {"صغير", "صغيره", "صغيرة", "مضغوط"}
 
-def preprocess_query(query: str):
-    """يرجع لستة كلمات بحث نظيفة بعد التطبيع وحذف الحشو وتوحيد المرادفات"""
-    normalized = normalize_text(query)
-    words = [w for w in normalized.split() if w]
-    cleaned = []
-    for w in words:
-        if w in STOPWORDS:
-            continue
-        cleaned.append(SYNONYMS.get(w, w))
-    return cleaned
+CHEAP_WORDS = {normalize_text(w) for w in _RAW_CHEAP}
+EXPENSIVE_WORDS = {normalize_text(w) for w in _RAW_EXPENSIVE}
+BIG_WORDS = {normalize_text(w) for w in _RAW_BIG}
+SMALL_WORDS = {normalize_text(w) for w in _RAW_SMALL}
+INTENT_WORDS = CHEAP_WORDS | EXPENSIVE_WORDS | BIG_WORDS | SMALL_WORDS
+
+
+def similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def extract_number(text: str):
+    """يطلع أول رقم موجود بالنص (للمساحة أو السعر)"""
+    if not text:
+        return None
+    cleaned = text.replace("$", "").replace("م²", "").replace("متر", "")
+    match = re.search(r"[\d,.]+", cleaned)
+    if match:
+        try:
+            return float(match.group().replace(",", ""))
+        except ValueError:
+            return None
+    return None
 
 
 def search_listings(query: str):
     """
-    كل كلمة من كلمات الاستعلام لحالها (مو الجملة كاملة كوحدة وحدة)
-    بيلاقي أي عرض فيه كل الكلمات المطلوبة مع بعض، حتى لو ما كانوا جنب بعضن.
+    بحث ذكي:
+    - يفهم كلمات المكان/النوع بالمطابقة المباشرة أو بالتشابه التقريبي (يتحمل أخطاء إملائية)
+    - يفهم نية الزبون (رخيص/غالي/كبير/صغير) ويرتب النتائج على أساسها
     """
-    results = []
-    search_words = preprocess_query(query)
-    if not search_words:
-        return results
+    normalized_query = normalize_text(query)
+    all_words = [w for w in normalized_query.split() if w]
+
+    wants_cheap = any(w in CHEAP_WORDS for w in all_words)
+    wants_expensive = any(w in EXPENSIVE_WORDS for w in all_words)
+    wants_big = any(w in BIG_WORDS for w in all_words)
+    wants_small = any(w in SMALL_WORDS for w in all_words)
+
+    search_words = [w for w in all_words if w not in STOPWORDS and w not in INTENT_WORDS]
+
+    scored_results = []
 
     with open(LISTINGS_FILE, encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            haystack_parts = []
-            for key in FIELDNAMES:
-                v = row.get(key)
-                if v:
-                    haystack_parts.append(str(v))
-            haystack = normalize_text(" ".join(haystack_parts))
+            haystack_parts = [str(row.get(k, "")) for k in FIELDNAMES if row.get(k)]
+            haystack_text = normalize_text(" ".join(haystack_parts))
+            haystack_words = haystack_text.split()
 
-            if all(w in haystack for w in search_words):
-                results.append(row)
+            total_score = 0.0
+            matched_words = 0
 
-    return results
+            for sw in search_words:
+                if sw in haystack_text:
+                    total_score += 1.0
+                    matched_words += 1
+                    continue
+                best = max((similarity(sw, hw) for hw in haystack_words), default=0)
+                if best >= 0.7:
+                    total_score += best
+                    matched_words += 1
+
+            if search_words:
+                required = max(1, len(search_words) - 1) if len(search_words) > 1 else 1
+                if matched_words < required:
+                    continue
+
+            price = extract_number(row.get("السعر", ""))
+            area = extract_number(row.get("المساحة", ""))
+
+            scored_results.append({
+                "row": row,
+                "score": total_score,
+                "price": price,
+                "area": area,
+            })
+
+    if not scored_results:
+        return []
+
+    if wants_cheap and any(r["price"] is not None for r in scored_results):
+        scored_results.sort(key=lambda r: (r["price"] if r["price"] is not None else float("inf")))
+    elif wants_expensive and any(r["price"] is not None for r in scored_results):
+        scored_results.sort(key=lambda r: (r["price"] if r["price"] is not None else -1), reverse=True)
+    elif wants_big and any(r["area"] is not None for r in scored_results):
+        scored_results.sort(key=lambda r: (r["area"] if r["area"] is not None else -1), reverse=True)
+    elif wants_small and any(r["area"] is not None for r in scored_results):
+        scored_results.sort(key=lambda r: (r["area"] if r["area"] is not None else float("inf")))
+    else:
+        scored_results.sort(key=lambda r: r["score"], reverse=True)
+
+    return [r["row"] for r in scored_results]
 
 
 def format_listing(row: dict) -> str:
@@ -141,7 +193,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🏢 <b>أهلاً وسهلاً فيك في مكتب الشهباء العقاري</b> 🏢\n\n"
         "وكيلك الذكي لأفضل فرص العقارات والأراضي بحلب وريفها 🌆\n\n"
         "🔍 اكتبلي وش تدور عليه وبرد عليك فورًا بالعروض المتوفرة\n"
-        "<i>مثلاً: أرض كفر حمرة، شقة الفرقان، بيت حريتان...</i>\n\n"
+        "<i>مثلاً: أرض كفر حمرة، شقة رخيصة، بيت واسع بحريتان...</i>\n\n"
         "📋 أو اكتب /leave_info لتسجيل بياناتك وطلبك، وفريقنا بيتواصل معك بأسرع وقت\n\n"
         "✨ <b>ثقتك وسرعة خدمتك أولويتنا</b> ✨"
     )
@@ -160,7 +212,7 @@ async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await update.message.reply_text(f"✅ لقيت هاي العروض المطابقة ({len(results)}):")
-    for row in results:
+    for row in results[:10]:
         await update.message.reply_text(format_listing(row), parse_mode="HTML")
 
     await update.message.reply_text(
@@ -188,12 +240,10 @@ async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     request_text = context.user_data.get("original_query", "") or "غير محدد"
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # حفظ بالملف
     with open(LEADS_FILE, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerow([name, phone, request_text, now])
 
-    # إرسال إشعار فوري ومنفصل للمالك بكل بيانات العميل
     if ADMIN_CHAT_ID:
         admin_msg = (
             "🔔 <b>طلب جديد من زبون</b>\n\n"
