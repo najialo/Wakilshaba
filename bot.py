@@ -8,6 +8,7 @@
 import csv
 import os
 import logging
+from datetime import datetime
 from telegram import Update, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder,
@@ -25,6 +26,7 @@ if not BOT_TOKEN:
 
 LISTINGS_FILE = "listings.csv"
 LEADS_FILE = "leads.csv"
+FIELDNAMES = ["نوع", "المنطقة", "المساحة", "السعر", "تفاصيل"]
 
 logging.basicConfig(level=logging.INFO)
 
@@ -35,12 +37,14 @@ def ensure_files():
     if not os.path.exists(LISTINGS_FILE):
         with open(LISTINGS_FILE, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
-            writer.writerow(["نوع", "المنطقة", "المساحة", "السعر", "تفاصيل"])
-            writer.writerow(["أرض", "حلب - الراموسة", "500م", "25000$", "أرض سكنية، صك أخضر"])
+            writer.writerow(FIELDNAMES)
+            writer.writerow(["أرض", "حلب - الراموسة", "500م", "25000$", "أرض سكنية صك أخضر"])
     if not os.path.exists(LEADS_FILE):
         with open(LEADS_FILE, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             writer.writerow(["الاسم", "الرقم", "طلب العميل", "التاريخ"])
+
+
 def normalize_text(text: str) -> str:
     """توحيد الحروف المتشابهة عشان البحث يشتغل حتى لو اختلفت الكتابة"""
     text = text.replace("ة", "ه")
@@ -50,19 +54,26 @@ def normalize_text(text: str) -> str:
 
 
 def search_listings(query: str):
+    """
+    يبحث بكل كلمة من كلمات الاستعلام لحالها (مو الجملة كاملة كوحدة وحدة).
+    مثال: "شقة الفرقان" بيلاقي أي عرض فيه كلمة "شقة" وكلمة "الفرقان" مع بعض،
+    حتى لو ما كانوا جنب بعض بالنص.
+    """
     results = []
     query = normalize_text(query.strip())
     if not query:
         return results
 
-    fieldnames = ["نوع", "المنطقة", "المساحة", "السعر", "تفاصيل"]
+    search_words = [w for w in query.split() if w]
+    if not search_words:
+        return results
 
     with open(LISTINGS_FILE, encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
             try:
                 values = []
-                for key in fieldnames:
+                for key in FIELDNAMES:
                     v = row.get(key)
                     if v is None:
                         continue
@@ -71,16 +82,13 @@ def search_listings(query: str):
                     else:
                         values.append(str(v))
                 combined = normalize_text(" ".join(values))
-                if query in combined:
-                    clean_row = {k: (row.get(k) if isinstance(row.get(k), str) else "") for k in fieldnames}
+                if all(word in combined for word in search_words):
+                    clean_row = {k: (row.get(k) if isinstance(row.get(k), str) else "") for k in FIELDNAMES}
                     results.append(clean_row)
             except Exception as e:
                 logging.warning(f"سطر فيه مشكلة بملف listings.csv، تم تجاهله: {e}")
                 continue
     return results
-
-
-
 
 
 def format_listing(row: dict, idx: int) -> str:
@@ -141,7 +149,6 @@ async def save_lead(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = context.user_data.get("name", "")
     last_query = context.user_data.get("last_query", "غير محدد")
 
-    from datetime import datetime
     with open(LEADS_FILE, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         writer.writerow([name, phone, last_query, datetime.now().strftime("%Y-%m-%d %H:%M")])
