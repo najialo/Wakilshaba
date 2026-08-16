@@ -30,13 +30,13 @@ logging.basicConfig(level=logging.INFO)
 
 ASK_NAME, ASK_PHONE = range(2)
 
+
 def ensure_files():
     if not os.path.exists(LISTINGS_FILE):
         with open(LISTINGS_FILE, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             writer.writerow(["نوع", "المنطقة", "المساحة", "السعر", "تفاصيل"])
             writer.writerow(["أرض", "حلب - الراموسة", "500م", "25000$", "أرض سكنية، صك أخضر"])
-            writer.writerow(["شقة", "حلب - الفرقان", "150م", "40000$", "3 غرف، طابق ثالث، تشطيب سوبر لوكس"])
     if not os.path.exists(LEADS_FILE):
         with open(LEADS_FILE, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
@@ -44,24 +44,47 @@ def ensure_files():
 
 
 def search_listings(query: str):
+    """
+    يبحث بملف العروض عن أي صف يحتوي على كلمة البحث.
+    مصمم بحيث ما ينهار حتى لو صار خطأ بعدد الفواصل بسطر معين —
+    بيتجاهل السطر الفاسد بدل ما يوقف البوت بالكامل.
+    """
     results = []
     query = query.strip()
     if not query:
         return results
+
+    fieldnames = ["نوع", "المنطقة", "المساحة", "السعر", "تفاصيل"]
+
     with open(LISTINGS_FILE, encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            combined = " ".join(row.values())
-            if query in combined:
-                results.append(row)
+            try:
+                values = []
+                for key in fieldnames:
+                    v = row.get(key)
+                    if v is None:
+                        continue
+                    if isinstance(v, list):
+                        values.extend(str(x) for x in v if x)
+                    else:
+                        values.append(str(v))
+                combined = " ".join(values)
+                if query in combined:
+                    # نبني صف نظيف يحتوي فقط على الأعمدة المتوقعة
+                    clean_row = {k: (row.get(k) if isinstance(row.get(k), str) else "") for k in fieldnames}
+                    results.append(clean_row)
+            except Exception as e:
+                logging.warning(f"سطر فيه مشكلة بملف listings.csv، تم تجاهله: {e}")
+                continue
     return results
 
 
 def format_listing(row: dict, idx: int) -> str:
     return (
-        f"{idx}️⃣ {row['نوع']} - {row['المنطقة']}\n"
-        f"   المساحة: {row['المساحة']} | السعر: {row['السعر']}\n"
-        f"   {row['تفاصيل']}"
+        f"{idx}️⃣ {row.get('نوع', '')} - {row.get('المنطقة', '')}\n"
+        f"   المساحة: {row.get('المساحة', '')} | السعر: {row.get('السعر', '')}\n"
+        f"   {row.get('تفاصيل', '')}"
     )
 
 
@@ -76,13 +99,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text
     context.user_data["last_query"] = query
-    results = search_listings(query)
+    try:
+        results = search_listings(query)
+    except Exception as e:
+        logging.error(f"خطأ أثناء البحث: {e}")
+        await update.message.reply_text(
+            "صار خطأ تقني بسيط أثناء البحث 🙁 جرب تكتب كلمة أبسط، أو اكتب /leave_info لنسجل طلبك."
+        )
+        return
+
     if not results:
         await update.message.reply_text(
             "ما لقيت عروض مطابقة حاليًا 🙁\n"
             "تحب نسجل طلبك ونرجعلك أول ما يتوفر شي مناسب؟ اكتب /leave_info"
         )
         return
+
     reply_lines = ["لقيت هاي العروض المطابقة:\n"]
     for i, row in enumerate(results[:5], start=1):
         reply_lines.append(format_listing(row, i))
