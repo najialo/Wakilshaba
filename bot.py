@@ -2,7 +2,8 @@
 """
 بوت تلجرام - وكيل الشباب أوفيس
 1) يرد تلقائي على استفسارات العملاء بالبحث الذكي في listings.csv
-2) يجمع بيانات العميل (اسم + رقم) ويخزنها في leads.csv ويرسلها للمالك فورًا
+2) يتعرف على التحيات ويرد بالترحيب
+3) يجمع بيانات العميل (اسم + رقم) ويخزنها في leads.csv ويرسلها للمالك فورًا
 """
 
 import csv
@@ -57,6 +58,18 @@ def normalize_text(text: str) -> str:
     return text
 
 
+# ============ قوائم الكلمات ============
+
+_RAW_SYNONYMS = {
+    "شقق": "شقة", "شقه": "شقة", "الشقق": "شقة", "الشقه": "شقة",
+    "اراضي": "أرض", "أراضي": "أرض", "الاراضي": "أرض", "ارض": "أرض",
+    "الارض": "أرض", "قطعة": "أرض", "قطع": "أرض", "محضر": "أرض",
+    "منازل": "منزل", "بيوت": "منزل", "بيت": "منزل", "البيت": "منزل",
+    "البيوت": "منزل", "دار": "منزل",
+    "مزارع": "مزرعة",
+}
+SYNONYMS = {normalize_text(k): normalize_text(v) for k, v in _RAW_SYNONYMS.items()}
+
 _RAW_STOPWORDS = {
     "موجود", "موجوده", "موجودة", "متوفر", "متوفره", "متوفرة",
     "شوفي", "شوف", "شوفلي", "ورجيني", "بدي", "بدك", "بدنا",
@@ -67,7 +80,6 @@ _RAW_STOPWORDS = {
 }
 STOPWORDS = {normalize_text(w) for w in _RAW_STOPWORDS}
 
-# كلمات بتدل على نية معينة (ترتيب حسب سعر/مساحة)
 _RAW_CHEAP = {"رخيص", "رخيصه", "رخيصة", "بسيط", "اقتصادي", "قليل", "منخفض"}
 _RAW_EXPENSIVE = {"غالي", "فاخر", "فخم", "مميز", "راقي", "عالي"}
 _RAW_BIG = {"كبير", "كبيره", "كبيرة", "واسع", "واسعه", "واسعة"}
@@ -78,6 +90,31 @@ EXPENSIVE_WORDS = {normalize_text(w) for w in _RAW_EXPENSIVE}
 BIG_WORDS = {normalize_text(w) for w in _RAW_BIG}
 SMALL_WORDS = {normalize_text(w) for w in _RAW_SMALL}
 INTENT_WORDS = CHEAP_WORDS | EXPENSIVE_WORDS | BIG_WORDS | SMALL_WORDS
+
+# كلمات/عبارات التحية - أي رسالة تتكون من هاي الكلمات بس بترد بالترحيب
+_RAW_GREETINGS = {
+    "السلام عليكم", "سلام عليكم", "عليكم السلام", "سلام",
+    "مرحبا", "مرحبا", "مرحبتين", "هلا", "هلا فيك", "هلا وغلا",
+    "كيفك", "كيفكم", "كيف الحال", "شلونك", "شخبارك",
+    "صباح الخير", "مساء الخير", "صباح النور", "مساء النور",
+    "هاي", "هلو", "hi", "hello",
+    "أهلا", "اهلا", "اهلين", "أهلين",
+}
+GREETINGS = {normalize_text(g) for g in _RAW_GREETINGS}
+
+
+def is_greeting(query: str) -> bool:
+    """يتحقق إذا الرسالة كلها أو معظمها تحية (مو بحث عن عقار)"""
+    normalized = normalize_text(query)
+    if normalized in GREETINGS:
+        return True
+    words = [w for w in normalized.split() if w]
+    if not words:
+        return False
+    # لو كل كلمات الرسالة تحيات (زي "مرحبا كيفك")
+    if all(w in GREETINGS or w in {normalize_text("و"), normalize_text("و ")} for w in words):
+        return True
+    return False
 
 
 def similarity(a: str, b: str) -> float:
@@ -101,7 +138,8 @@ def extract_number(text: str):
 def search_listings(query: str):
     """
     بحث ذكي:
-    - يفهم كلمات المكان/النوع بالمطابقة المباشرة أو بالتشابه التقريبي (يتحمل أخطاء إملائية)
+    - يوحّد المرادفات والجموع (شقق/شقة، بيوت/منزل...)
+    - يفهم كلمات قريبة بالتشابه التقريبي (يتحمل أخطاء إملائية)
     - يفهم نية الزبون (رخيص/غالي/كبير/صغير) ويرتب النتائج على أساسها
     """
     normalized_query = normalize_text(query)
@@ -112,7 +150,11 @@ def search_listings(query: str):
     wants_big = any(w in BIG_WORDS for w in all_words)
     wants_small = any(w in SMALL_WORDS for w in all_words)
 
-    search_words = [w for w in all_words if w not in STOPWORDS and w not in INTENT_WORDS]
+    search_words = [
+        SYNONYMS.get(w, w)
+        for w in all_words
+        if w not in STOPWORDS and w not in INTENT_WORDS
+    ]
 
     scored_results = []
 
@@ -186,22 +228,30 @@ def format_listing(row: dict) -> str:
     )
 
 
+WELCOME_MESSAGE = (
+    "🏢 <b>أهلاً وسهلاً فيك في مكتب الشهباء العقاري</b> 🏢\n\n"
+    "وكيلك الذكي لأفضل فرص العقارات والأراضي بحلب وريفها 🌆\n\n"
+    "🔍 اكتبلي وش تدور عليه وبرد عليك فورًا بالعروض المتوفرة\n"
+    "<i>مثلاً: أرض كفر حمرة، شقة رخيصة، بيت واسع بحريتان...</i>\n\n"
+    "📋 أو اكتب /leave_info لتسجيل بياناتك وطلبك، وفريقنا بيتواصل معك بأسرع وقت\n\n"
+    "✨ <b>ثقتك وسرعة خدمتك أولويتنا</b> ✨"
+)
+
+
 # ============ أوامر البوت ============
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome = (
-        "🏢 <b>أهلاً وسهلاً فيك في مكتب الشهباء العقاري</b> 🏢\n\n"
-        "وكيلك الذكي لأفضل فرص العقارات والأراضي بحلب وريفها 🌆\n\n"
-        "🔍 اكتبلي وش تدور عليه وبرد عليك فورًا بالعروض المتوفرة\n"
-        "<i>مثلاً: أرض كفر حمرة، شقة رخيصة، بيت واسع بحريتان...</i>\n\n"
-        "📋 أو اكتب /leave_info لتسجيل بياناتك وطلبك، وفريقنا بيتواصل معك بأسرع وقت\n\n"
-        "✨ <b>ثقتك وسرعة خدمتك أولويتنا</b> ✨"
-    )
-    await update.message.reply_text(welcome, parse_mode="HTML")
+    await update.message.reply_text(WELCOME_MESSAGE, parse_mode="HTML")
 
 
 async def handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text
+
+    # لو الرسالة تحية، رد بالترحيب بدل البحث
+    if is_greeting(query):
+        await update.message.reply_text(WELCOME_MESSAGE, parse_mode="HTML")
+        return
+
     results = search_listings(query)
 
     if not results:
